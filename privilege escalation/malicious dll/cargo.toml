@@ -1,0 +1,28 @@
+[package]
+name = "KBDUS"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+windows = {
+    version = "0.62.2",
+    features =
+    [
+        "Win32_UI_WindowsAndMessaging",
+        "Win32_System_SystemServices",
+        "Win32_Storage_FileSystem",
+        "Win32_Foundation",
+        "Win32_System_Memory",
+        "Win32_System_LibraryLoader",
+        "Win32_Security",
+        "System",
+        "Win32_System_Diagnostics"
+    ]
+}
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { version = "1", features = ["full"] }
+win-sys = "0.3.1"
+windows-sys = "0.61.2"
+
+[lib]
+crate-type = ["cdylib"]
